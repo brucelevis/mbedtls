@@ -802,6 +802,80 @@ static psa_algorithm_t translate_md_to_psa( mbedtls_md_type_t md_alg )
     }
 }
 
+
+static int extract_ecdsa_sig( unsigned char **p, const unsigned char *end,
+                              mbedtls_asn1_buf *sig )
+{
+    int ret, tag_type;
+    size_t len_signature, len_partial;
+    if( ( end - *p ) < 1 )
+    {
+        return( -1 );
+    }
+    tag_type = **p;
+    if( ( ret = mbedtls_asn1_get_tag( p, end, &len_partial,
+                MBEDTLS_ASN1_CONSTRUCTED | MBEDTLS_ASN1_SEQUENCE ) ) != 0 )
+    {
+        return( -1 );
+    }
+    if( ( ret = mbedtls_asn1_get_tag( p, end, &len_partial, MBEDTLS_ASN1_INTEGER ) )
+           != 0 )
+        return( ret );
+    if( **p == '\0' )
+    {
+        ( *p )++;
+        len_partial--;
+    }
+    sig->p = mbedtls_calloc( 2, len_partial );
+    if( sig->p == NULL )
+        return( MBEDTLS_ERR_ASN1_ALLOC_FAILED );
+    memcpy( sig->p, *p, len_partial );
+    len_signature = len_partial;
+    ( *p ) += len_partial;
+    if( ( ret = mbedtls_asn1_get_tag( p, end, &len_partial,
+                                      MBEDTLS_ASN1_INTEGER ) ) != 0 )
+    {
+        mbedtls_free( sig->p );
+        sig->p = NULL;
+        return( ret );
+    }
+    if( **p == '\0' )
+    {
+        ( *p )++;
+        len_partial--;
+    }
+    // Check if both parts are of the same size
+    if( len_partial != len_signature )
+        return( -1 );
+    memcpy( sig->p + len_partial, *p, len_partial );
+    len_signature += len_partial;
+    sig->tag = tag_type;
+    sig->len = len_signature;
+    ( *p ) += len_partial;
+    return( 0 );
+}
+
+static int pk_opaque_verify( void *ctx, mbedtls_md_type_t md_alg,
+                       const unsigned char *hash, size_t hash_len,
+                       const unsigned char *sig, size_t sig_len )
+{
+    mbedtls_asn1_buf signature;
+    psa_algorithm_t psa_sig_md = PSA_ALG_ECDSA( translate_md_to_psa( md_alg ) );
+    psa_key_slot_t* key_slot = (psa_key_slot_t *) ctx;
+
+    if( extract_ecdsa_sig( (unsigned char **) &sig, sig + sig_len, &signature ) != 0 )
+           return( MBEDTLS_ERR_PK_BAD_INPUT_DATA );
+
+    if( psa_asymmetric_verify( *key_slot, psa_sig_md,
+                                hash, hash_len,
+                                signature.p, signature.len )
+        != PSA_SUCCESS )
+        {
+             return( MBEDTLS_ERR_ECP_VERIFY_FAILED );
+        }
+    return( 0 );
+}
+
 /* Like mbedtls_asn1_write_mpi, but from a buffer */
 static int asn1_write_mpibuf( unsigned char **p, unsigned char *start,
                               const unsigned char *src, size_t slen )
@@ -910,7 +984,7 @@ const mbedtls_pk_info_t mbedtls_pk_opaque_info = {
     "Opaque",
     pk_opaque_get_bitlen,
     pk_opaque_can_do,
-    NULL, /* verify - will be done later */
+    pk_opaque_verify,
     pk_opaque_sign_wrap,
 #if defined(MBEDTLS_ECDSA_C) && defined(MBEDTLS_ECP_RESTARTABLE)
     NULL, /* restartable verify - not relevant */
